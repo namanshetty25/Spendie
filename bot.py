@@ -1,13 +1,14 @@
-# bot.py - Telegram bot for expense tracking
+# bot.py - Updated for Render Web Service deployment
 
 import os
 import json
 import tempfile
+import threading
+from flask import Flask, request, jsonify
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
 
-# Change this import to use the new parser
 from parser import (
     process_user_message, parse_transaction, parse_query, 
     is_balance_query, is_transaction_input, enhance_query_with_context
@@ -30,6 +31,22 @@ from upi_ocr import (
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+# Flask app for Render Web Service
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "🤖 Spendie Bot is running on Render!"
+
+@flask_app.route("/health")
+def health():
+    return jsonify({"status": "healthy", "bot": "running"})
+
+@flask_app.route("/ping")
+def ping():
+    return "pong"
+
+# Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -37,6 +54,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 'Spent ₹200 on groceries'\n"
         "• 'Got ₹5000 salary'\n"
         "• 'Got 1200 from dad' (informal amounts work!)\n"
+        "• 'John gave me 1000' (person names work!)\n"
         "• 'Papa ne 1200 diye' (Hindi also works!)\n\n"
         "📱 *UPI Screenshots:*\n"
         "• Send UPI payment screenshots\n"
@@ -53,15 +71,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/delete_all - Clear all data\n"
         "/categories - Show spending by category\n"
         "/patterns - Show spending patterns\n"
+        "/ocr_status - Check OCR service status",
         parse_mode="Markdown"
     )
 
-# Replace the old handle_message function with the new one
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.message.from_user.id
     
-    # Use the new enhanced parser
     result = process_user_message(user_text)
     
     if result.get('message_type') == 'transaction':
@@ -232,7 +249,6 @@ async def handle_unknown_message(update: Update, result: dict):
         parse_mode="Markdown"
     )
 
-# Keep all other functions the same (handle_photo, balance, categories, etc.)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_description = update.message.caption or ""
@@ -389,7 +405,11 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
-def main():
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.run(host="0.0.0.0", port=port, debug=False)
+
+def run_bot():
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -403,10 +423,16 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # For Render deployment
     print("🤖 Spendie Bot is running on Render...")
     app.run_polling()
 
+def main():
+    # Start Flask server in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Start Telegram bot
+    run_bot()
+
 if __name__ == "__main__":
     main()
-
