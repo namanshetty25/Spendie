@@ -1,10 +1,11 @@
-# bot.py - Simplified webhook implementation that works
+# bot.py 
 
 import os
 import json
 import tempfile
 import asyncio
 import threading
+import concurrent.futures
 from flask import Flask, request, jsonify
 from telegram import Update, Bot, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -35,8 +36,10 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 # Flask app
 app = Flask(__name__)
 
-# Global bot application
+# Global variables
 bot_app = None
+event_loop = None
+executor = None
 
 @app.route("/")
 def home():
@@ -52,7 +55,7 @@ def ping():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Handle incoming webhook updates from Telegram - SIMPLIFIED"""
+    """Fixed webhook handler following best practices"""
     try:
         update_data = request.get_json()
         if not update_data:
@@ -60,28 +63,20 @@ def webhook():
             
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Process update synchronously in a new thread
-        def process_in_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(bot_app.process_update(update))
-            except Exception as e:
-                print(f"Error processing update: {e}")
-            finally:
-                loop.close()
+        # Use asyncio.run_coroutine_threadsafe as recommended
+        future = asyncio.run_coroutine_threadsafe(
+            bot_app.process_update(update), 
+            event_loop
+        )
         
-        # Start processing in background thread
-        thread = threading.Thread(target=process_in_thread)
-        thread.daemon = True
-        thread.start()
-        
+        # Don't wait for completion to avoid blocking Flask
         return "OK", 200
+        
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
-# All your existing handler functions remain exactly the same
+# All handler functions remain the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -370,7 +365,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# Command handlers
+# Command handlers (keep all existing ones)
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await handle_balance_query(update, user_id)
@@ -445,53 +440,63 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
+def run_bot_loop():
+    """Run bot event loop in separate thread"""
+    global event_loop
+    event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(event_loop)
+    
+    # Keep the loop running
+    event_loop.run_forever()
+
 def main():
-    """Main function - simplified"""
-    global bot_app
+    """Main function following all best practices"""
+    global bot_app, event_loop, executor
     
-    # Initialize bot
-    bot_app = ApplicationBuilder().token(TOKEN).build()
+    print("🚀 Initializing Spendie Bot...")
     
-    # Add handlers
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("balance", balance))
-    bot_app.add_handler(CommandHandler("categories", categories))
-    bot_app.add_handler(CommandHandler("patterns", patterns))
-    bot_app.add_handler(CommandHandler("export", export))
-    bot_app.add_handler(CommandHandler("delete_all", delete_all))
-    bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
+    # Start event loop in separate thread
+    bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
+    bot_thread.start()
     
-    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Wait for event loop to be ready
+    import time
+    time.sleep(1)
     
-    # Set webhook in a separate thread
-    def set_webhook():
+    # Initialize bot application once at startup
+    async def init_bot():
+        global bot_app
+        bot_app = ApplicationBuilder().token(TOKEN).build()
+        
+        # Add handlers
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("balance", balance))
+        bot_app.add_handler(CommandHandler("categories", categories))
+        bot_app.add_handler(CommandHandler("patterns", patterns))
+        bot_app.add_handler(CommandHandler("export", export))
+        bot_app.add_handler(CommandHandler("delete_all", delete_all))
+        bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
+        
+        bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        await bot_app.initialize()
+        
+        # Set webhook
         if WEBHOOK_URL:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-                loop.run_until_complete(bot_app.bot.set_webhook(webhook_url))
-                print(f"✅ Webhook set to: {webhook_url}")
-            except Exception as e:
-                print(f"Error setting webhook: {e}")
-            finally:
-                loop.close()
+            webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
+            await bot_app.bot.set_webhook(webhook_url)
+            print(f"✅ Webhook set to: {webhook_url}")
+        
+        print("✅ Bot initialized successfully")
     
     # Initialize bot
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot_app.initialize())
-    loop.close()
-    
-    # Set webhook
-    webhook_thread = threading.Thread(target=set_webhook)
-    webhook_thread.daemon = True
-    webhook_thread.start()
+    future = asyncio.run_coroutine_threadsafe(init_bot(), event_loop)
+    future.result()  # Wait for initialization
     
     # Run Flask app
     port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Starting Spendie Bot on port {port}...")
+    print(f"🚀 Starting Flask server on port {port}...")
     print("📡 Webhook mode enabled")
     
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
