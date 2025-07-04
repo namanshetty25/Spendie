@@ -1,4 +1,4 @@
-# upi_ocr.py - OCR processing for UPI transaction screenshots
+# upi_ocr.py - Simplified OCR processing 
 
 import os
 import requests
@@ -13,9 +13,10 @@ try:
     import cv2
     import numpy as np
     TESSERACT_AVAILABLE = True
-except ImportError:
+    print("✅ OCR libraries loaded successfully")
+except ImportError as e:
     TESSERACT_AVAILABLE = False
-    print("⚠️ Warning: pytesseract and cv2 not installed. OCR functionality will be limited.")
+    print(f"⚠️ Warning: OCR libraries not available - {e}")
 
 from parser import call_groq
 
@@ -33,7 +34,7 @@ def extract_text_from_image(image_path_or_bytes):
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         denoised = cv2.medianBlur(thresh, 5)
         
-        custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz₹.,:-/ '
+        custom_config = r'--oem 3 --psm 6'
         text = pytesseract.image_to_string(denoised, config=custom_config)
         
         return text.strip()
@@ -42,101 +43,101 @@ def extract_text_from_image(image_path_or_bytes):
         return ""
 
 def parse_upi_screenshot(extracted_text, user_description=""):
+    """Parse any screenshot text using AI model - no legitimacy checks"""
+    
     system_prompt = """
-You are an expert UPI transaction parser for Indian payment apps. Extract transaction details from OCR text and return ONLY valid JSON.
+You are an expert transaction parser. Extract transaction details from any screenshot text and return ONLY valid JSON.
 
-Common UPI apps: PhonePe, Paytm, Google Pay, BHIM, Amazon Pay, Cred, WhatsApp Pay, etc.
+Your job is to:
+1. Look for any amount mentioned (₹, Rs, numbers)
+2. Determine if money was paid/sent (expense) or received (income)
+3. Extract any person/business names mentioned
+4. Detect the app name if possible
+5. Create a reasonable description
 
-UPI Transaction patterns to look for:
-1. AMOUNT: ₹123, Rs 123, INR 123, 123.00, 123/-
-2. TRANSACTION TYPE:
-   - PAID/SENT: "Paid to", "Sent to", "Payment successful", "Money sent", "Transferred"
-   - RECEIVED: "Received from", "Money received", "Payment received", "Credited"
-3. RECIPIENT/SENDER: Names, phone numbers, UPI IDs
-4. TRANSACTION ID: Usually alphanumeric codes
-5. DATE/TIME: Various formats
-6. STATUS: Success, Failed, Pending
+TRANSACTION TYPES:
+- EXPENSE: paid, sent, transferred, spent, bought, bill payment
+- INCOME: received, credited, got, earned
 
-Extract these details:
+CATEGORIES:
+- food, transport, shopping, utilities, entertainment, health, education
+- salary, freelance, transfer, bills, miscellaneous
+
+REQUIRED JSON FORMAT:
 {
     "type": "income" or "expense",
     "amount": integer (extract number only),
     "description": "brief description of transaction",
     "category": "auto-detected category",
-    "recipient_sender": "person/business name",
-    "transaction_id": "UPI transaction ID if found",
-    "app_name": "detected UPI app name",
+    "recipient_sender": "person/business name if found" or null,
+    "transaction_id": "any ID found" or null,
+    "app_name": "detected app name" or null,
     "confidence": "high" or "medium" or "low"
 }
 
-Categories for UPI transactions:
-- food (restaurants, food delivery, groceries)
-- transport (taxi, fuel, parking)
-- shopping (online/offline purchases)
-- utilities (electricity, gas, water, mobile recharge)
-- entertainment (movies, games, subscriptions)
-- health (medicines, doctor fees)
-- education (fees, courses)
-- transfer (person-to-person transfers)
-- bills (rent, EMI, insurance)
-- miscellaneous (others)
+IMPORTANT:
+- If you find any amount, create a transaction
+- If unclear whether paid or received, guess based on context
+- If no clear amount, set confidence to "low" but still try
+- Don't worry about whether it's a legitimate UPI screenshot
+- Extract whatever information you can find
 
-If user has provided additional description, incorporate it into the transaction description.
-Return ONLY the JSON object. If transaction details cannot be clearly determined, set confidence to "low".
+Return ONLY the JSON object.
 """
     
     user_prompt = f"""
-OCR Extracted Text:
+Screenshot Text:
 {extracted_text}
 
 User Description (if provided):
 {user_description}
 
-Parse this UPI transaction and return JSON with extracted details.
+Extract transaction details from this text and return JSON.
 """
     
     try:
         result = call_groq(system_prompt, user_prompt)
         return json.loads(result)
     except Exception as e:
-        print(f"UPI parsing error: {e}")
-        return None
+        print(f"Parsing error: {e}")
+        # Return a basic structure if parsing fails
+        return {
+            "type": "expense",
+            "amount": 0,
+            "description": "Could not parse screenshot",
+            "category": "miscellaneous",
+            "confidence": "low",
+            "recipient_sender": None,
+            "transaction_id": None,
+            "app_name": None
+        }
 
 def validate_upi_transaction(transaction_data):
+    """Simplified validation - just check if amount exists"""
     if not transaction_data:
-        return False, "Could not parse transaction data"
+        return False, "No transaction data"
     
-    required_fields = ['type', 'amount', 'description']
-    for field in required_fields:
-        if field not in transaction_data or not transaction_data[field]:
-            return False, f"Missing required field: {field}"
-    
+    # Only check if amount is present and greater than 0
     try:
-        amount = int(transaction_data['amount'])
+        amount = int(transaction_data.get('amount', 0))
         if amount <= 0:
-            return False, "Invalid amount"
+            return False, "No valid amount found"
     except (ValueError, TypeError):
         return False, "Invalid amount format"
     
-    if transaction_data['type'] not in ['income', 'expense']:
-        return False, "Invalid transaction type"
-    
-    confidence = transaction_data.get('confidence', 'low')
-    if confidence == 'low':
-        return True, "Low confidence in parsing - please verify"
-    
-    return True, "Valid transaction"
+    return True, "Transaction processed"
 
 def enhance_upi_description(transaction_data, user_description=""):
+    """Enhance transaction description"""
     base_description = transaction_data.get('description', '')
     
     upi_context = []
     
     if transaction_data.get('recipient_sender'):
         if transaction_data['type'] == 'expense':
-            upi_context.append(f"paid to {transaction_data['recipient_sender']}")
+            upi_context.append(f"to {transaction_data['recipient_sender']}")
         else:
-            upi_context.append(f"received from {transaction_data['recipient_sender']}")
+            upi_context.append(f"from {transaction_data['recipient_sender']}")
     
     if transaction_data.get('app_name'):
         upi_context.append(f"via {transaction_data['app_name']}")
@@ -152,6 +153,7 @@ def enhance_upi_description(transaction_data, user_description=""):
     return final_description
 
 def extract_text_online_ocr(image_bytes):
+    """Extract text using online OCR service as fallback"""
     try:
         OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY")
         if not OCR_SPACE_API_KEY:
@@ -166,10 +168,7 @@ def extract_text_online_ocr(image_bytes):
             'apikey': OCR_SPACE_API_KEY,
             'language': 'eng',
             'detectOrientation': 'true',
-            'isCreateSearchablePdf': 'false',
-            'isSearchablePdfHideTextLayer': 'false',
-            'OCREngine': '2',
-            'isTable': 'false'
+            'OCREngine': '2'
         }
         
         response = requests.post(url, files=files, data=data)
@@ -187,64 +186,3 @@ def extract_text_online_ocr(image_bytes):
     except Exception as e:
         print(f"Online OCR error: {e}")
         return "OCR service unavailable"
-
-def detect_upi_app(text):
-    upi_apps = {
-        'phonepe': ['phonepe', 'phone pe', 'purple app'],
-        'paytm': ['paytm', 'pay tm'],
-        'googlepay': ['google pay', 'gpay', 'tez'],
-        'bhim': ['bhim', 'bhim upi'],
-        'amazonpay': ['amazon pay', 'amazon'],
-        'cred': ['cred', 'cred pay'],
-        'whatsapp': ['whatsapp', 'whatsapp pay'],
-        'freecharge': ['freecharge', 'free charge'],
-        'mobikwik': ['mobikwik', 'mobi kwik'],
-        'airtel': ['airtel money', 'airtel payments'],
-        'jio': ['jio money', 'jio pay'],
-        'sbi': ['sbi pay', 'yono sbi'],
-        'icici': ['icici', 'imobile'],
-        'hdfc': ['hdfc', 'paymentapp']
-    }
-    
-    text_lower = text.lower()
-    for app_name, keywords in upi_apps.items():
-        for keyword in keywords:
-            if keyword in text_lower:
-                return app_name
-    
-    return "unknown"
-
-def extract_upi_amount(text):
-    amount_patterns = [
-        r'₹\s*(\d+(?:,\d+)*(?:\.\d{2})?)',
-        r'rs\.?\s*(\d+(?:,\d+)*(?:\.\d{2})?)',
-        r'inr\s*(\d+(?:,\d+)*(?:\.\d{2})?)',
-        r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*/-',
-        r'paid\s*.*?(\d+(?:,\d+)*(?:\.\d{2})?)',
-        r'sent\s*.*?(\d+(?:,\d+)*(?:\.\d{2})?)',
-        r'received\s*.*?(\d+(?:,\d+)*(?:\.\d{2})?)',
-    ]
-    
-    for pattern in amount_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        if matches:
-            amount_str = matches[0].replace(',', '').replace('.', '')
-            try:
-                return int(amount_str)
-            except ValueError:
-                continue
-    
-    return None
-
-def is_upi_screenshot(text):
-    upi_indicators = [
-        'upi', 'payment', 'transaction', 'paid', 'received', 'sent',
-        'successful', 'phonepe', 'paytm', 'google pay', 'gpay',
-        'bhim', 'amazon pay', 'cred', 'whatsapp pay', '₹', 'rupees',
-        'transaction id', 'reference number', 'to:', 'from:'
-    ]
-    
-    text_lower = text.lower()
-    matches = sum(1 for indicator in upi_indicators if indicator in text_lower)
-    
-    return matches >= 2
