@@ -2,8 +2,8 @@ python-telegram-bot==20.7
 pymongo==4.6.1
 python-dotenv==1.0.0
 requests==2.31.0
-Pillow==10.1.0
+Pillow>=10.4.0
 pytesseract==0.3.10
 opencv-python-headless==4.8.1.78
-numpy==1.24.3
+numpy>=1.24.3
 Flask==2.3.3
