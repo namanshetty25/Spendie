@@ -1,4 +1,4 @@
-# bot.py 
+# bot.py - Simplified webhook implementation that works
 
 import os
 import json
@@ -7,7 +7,7 @@ import asyncio
 import threading
 from flask import Flask, request, jsonify
 from telegram import Update, Bot, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, Application
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
 
 from parser import (
@@ -32,12 +32,11 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Flask app for webhook
+# Flask app
 app = Flask(__name__)
 
 # Global bot application
 bot_app = None
-update_queue = asyncio.Queue()
 
 @app.route("/")
 def home():
@@ -53,32 +52,36 @@ def ping():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Handle incoming webhook updates from Telegram"""
+    """Handle incoming webhook updates from Telegram - SIMPLIFIED"""
     try:
         update_data = request.get_json()
+        if not update_data:
+            return "No data", 400
+            
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Put update in queue for async processing
-        asyncio.run_coroutine_threadsafe(
-            update_queue.put(update), 
-            bot_app._loop if hasattr(bot_app, '_loop') else asyncio.get_event_loop()
-        )
+        # Process update synchronously in a new thread
+        def process_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(bot_app.process_update(update))
+            except Exception as e:
+                print(f"Error processing update: {e}")
+            finally:
+                loop.close()
+        
+        # Start processing in background thread
+        thread = threading.Thread(target=process_in_thread)
+        thread.daemon = True
+        thread.start()
         
         return "OK", 200
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
-async def process_updates():
-    """Process updates from the queue"""
-    while True:
-        try:
-            update = await update_queue.get()
-            await bot_app.process_update(update)
-        except Exception as e:
-            print(f"Error processing update: {e}")
-
-# Telegram bot handlers
+# All your existing handler functions remain exactly the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -367,6 +370,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+# Command handlers
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await handle_balance_query(update, user_id)
@@ -441,19 +445,14 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
-def run_flask():
-    """Run Flask app in a separate thread"""
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-async def main():
-    """Main async function"""
+def main():
+    """Main function - simplified"""
     global bot_app
     
     # Initialize bot
     bot_app = ApplicationBuilder().token(TOKEN).build()
     
-    # Add all handlers
+    # Add handlers
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("balance", balance))
     bot_app.add_handler(CommandHandler("categories", categories))
@@ -465,23 +464,37 @@ async def main():
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    await bot_app.initialize()
+    # Set webhook in a separate thread
+    def set_webhook():
+        if WEBHOOK_URL:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
+                loop.run_until_complete(bot_app.bot.set_webhook(webhook_url))
+                print(f"✅ Webhook set to: {webhook_url}")
+            except Exception as e:
+                print(f"Error setting webhook: {e}")
+            finally:
+                loop.close()
     
-    # Set webhook if URL is provided
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-        await bot_app.bot.set_webhook(webhook_url)
-        print(f"✅ Webhook set to: {webhook_url}")
-        
-        # Start Flask in a separate thread
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Start processing updates
-        await process_updates()
-    else:
-        print("🤖 Running in polling mode...")
-        await bot_app.run_polling()
+    # Initialize bot
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_app.initialize())
+    loop.close()
+    
+    # Set webhook
+    webhook_thread = threading.Thread(target=set_webhook)
+    webhook_thread.daemon = True
+    webhook_thread.start()
+    
+    # Run Flask app
+    port = int(os.environ.get('PORT', 8080))
+    print(f"🚀 Starting Spendie Bot on port {port}...")
+    print("📡 Webhook mode enabled")
+    
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
