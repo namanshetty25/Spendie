@@ -1,9 +1,10 @@
-# bot.py - Complete Telegram bot for expense tracking with webhook support
+# bot.py 
 
 import os
 import json
 import tempfile
 import asyncio
+import threading
 from flask import Flask, request, jsonify
 from telegram import Update, Bot, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, Application
@@ -36,6 +37,7 @@ app = Flask(__name__)
 
 # Global bot application
 bot_app = None
+update_queue = asyncio.Queue()
 
 @app.route("/")
 def home():
@@ -56,16 +58,25 @@ def webhook():
         update_data = request.get_json()
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Process the update in async context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_app.process_update(update))
-        loop.close()
+        # Put update in queue for async processing
+        asyncio.run_coroutine_threadsafe(
+            update_queue.put(update), 
+            bot_app._loop if hasattr(bot_app, '_loop') else asyncio.get_event_loop()
+        )
         
         return "OK", 200
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
+
+async def process_updates():
+    """Process updates from the queue"""
+    while True:
+        try:
+            update = await update_queue.get()
+            await bot_app.process_update(update)
+        except Exception as e:
+            print(f"Error processing update: {e}")
 
 # Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,20 +252,28 @@ async def handle_query(update: Update, result: dict, user_id: int):
         )
 
 async def handle_balance_query(update: Update, user_id: int):
-    income, expense = get_balance(user_id)
-    net = income - expense
-    
-    category_breakdown = get_category_breakdown(user_id, "expense")
-    top_category = max(category_breakdown.items(), key=lambda x: x[1]) if category_breakdown else ("N/A", 0)
-    
-    await update.message.reply_text(
-        f"💸 *Your Balance Summary:*\n"
-        f"🟢 Income: ₹{income:,}\n"
-        f"🔴 Expense: ₹{expense:,}\n"
-        f"🧾 Net: ₹{net:,}\n"
-        f"📊 Top Category: {top_category[0]} (₹{top_category[1]:,})",
-        parse_mode="Markdown"
-    )
+    try:
+        income, expense = get_balance(user_id)
+        net = income - expense
+        
+        category_breakdown = get_category_breakdown(user_id, "expense")
+        top_category = max(category_breakdown.items(), key=lambda x: x[1]) if category_breakdown else ("N/A", 0)
+        
+        await update.message.reply_text(
+            f"💸 *Your Balance Summary:*\n"
+            f"🟢 Income: ₹{income:,}\n"
+            f"🔴 Expense: ₹{expense:,}\n"
+            f"🧾 Net: ₹{net:,}\n"
+            f"📊 Top Category: {top_category[0]} (₹{top_category[1]:,})",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Balance query error: {e}")
+        await update.message.reply_text(
+            "❌ *Error getting balance*\n"
+            "Something went wrong. Please try again.",
+            parse_mode="Markdown"
+        )
 
 async def handle_unknown_message(update: Update, result: dict):
     await update.message.reply_text(
@@ -298,7 +317,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         os.unlink(image_path)
         
-        # Process any image - no UPI check
         transaction_data = parse_upi_screenshot(extracted_text, user_description)
         
         if not transaction_data or transaction_data.get('amount', 0) <= 0:
@@ -423,10 +441,16 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
-async def initialize_bot():
-    """Initialize the bot application"""
+def run_flask():
+    """Run Flask app in a separate thread"""
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+async def main():
+    """Main async function"""
     global bot_app
     
+    # Initialize bot
     bot_app = ApplicationBuilder().token(TOKEN).build()
     
     # Add all handlers
@@ -448,26 +472,16 @@ async def initialize_bot():
         webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
         await bot_app.bot.set_webhook(webhook_url)
         print(f"✅ Webhook set to: {webhook_url}")
+        
+        # Start Flask in a separate thread
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Start processing updates
+        await process_updates()
     else:
         print("🤖 Running in polling mode...")
-
-def main():
-    # Initialize bot
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(initialize_bot())
-    
-    # Run Flask app
-    port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Starting Spendie Bot on port {port}...")
-    
-    if WEBHOOK_URL:
-        print("📡 Webhook mode enabled")
-        app.run(host="0.0.0.0", port=port, debug=False)
-    else:
-        print("🔄 Polling mode enabled")
-        # For local development - run polling
-        loop.run_until_complete(bot_app.run_polling())
+        await bot_app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
