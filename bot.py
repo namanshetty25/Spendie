@@ -450,10 +450,10 @@ def run_bot_loop():
     event_loop.run_forever()
 
 def main():
-    """Main function following all best practices"""
+    """Main function optimized for Pella deployment"""
     global bot_app, event_loop, executor
     
-    print("🚀 Initializing Spendie Bot...")
+    print("🚀 Initializing Spendie Bot for Pella...")
     
     # Start event loop in separate thread
     bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
@@ -461,14 +461,14 @@ def main():
     
     # Wait for event loop to be ready
     import time
-    time.sleep(1)
+    time.sleep(2)
     
-    # Initialize bot application once at startup
+    # Initialize bot application
     async def init_bot():
         global bot_app
         bot_app = ApplicationBuilder().token(TOKEN).build()
         
-        # Add handlers
+        # Add all handlers
         bot_app.add_handler(CommandHandler("start", start))
         bot_app.add_handler(CommandHandler("balance", balance))
         bot_app.add_handler(CommandHandler("categories", categories))
@@ -476,13 +476,12 @@ def main():
         bot_app.add_handler(CommandHandler("export", export))
         bot_app.add_handler(CommandHandler("delete_all", delete_all))
         bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
-        
         bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         await bot_app.initialize()
         
-        # Set webhook
+        # Set webhook for Pella
         if WEBHOOK_URL:
             webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
             await bot_app.bot.set_webhook(webhook_url)
@@ -492,14 +491,21 @@ def main():
     
     # Initialize bot
     future = asyncio.run_coroutine_threadsafe(init_bot(), event_loop)
-    future.result()  # Wait for initialization
+    future.result()
     
-    # Run Flask app
+    # Run Flask app on Pella's expected port
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Starting Flask server on port {port}...")
-    print("📡 Webhook mode enabled")
+    print("📡 Webhook mode enabled for Pella")
     
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    # Use Pella-compatible settings
+    app.run(
+        host="0.0.0.0", 
+        port=port, 
+        debug=False, 
+        threaded=True,
+        use_reloader=False  # Important for Pella
+    )
 
 if __name__ == "__main__":
     main()
