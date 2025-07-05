@@ -1,28 +1,25 @@
-# bot.py 
+# bot.py
 
 import os
 import json
 import tempfile
 import asyncio
 import threading
-import concurrent.futures
 from flask import Flask, request, jsonify
 from telegram import Update, Bot, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
 
 from parser import (
-    process_user_message, parse_transaction, parse_query, 
-    is_balance_query, is_transaction_input, enhance_query_with_context
+    process_user_message, parse_transaction, parse_query,
+    is_balance_query, is_transaction_input, enhance_query_with_context, call_groq
 )
-
 from db import (
     add_transaction, get_balance, query_transactions,
     export_transactions_csv, delete_all_transactions,
     get_category_breakdown, get_spending_patterns,
     get_daily_totals, compare_periods
 )
-
 from upi_ocr import (
     extract_text_from_image, extract_text_online_ocr,
     parse_upi_screenshot, validate_upi_transaction,
@@ -30,16 +27,13 @@ from upi_ocr import (
 )
 
 load_dotenv()
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Flask app
 app = Flask(__name__)
-
-# Global variables
 bot_app = None
 event_loop = None
-executor = None
 
 @app.route("/")
 def home():
@@ -55,28 +49,20 @@ def ping():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Fixed webhook handler following best practices"""
     try:
         update_data = request.get_json()
         if not update_data:
             return "No data", 400
-            
         update = Update.de_json(update_data, bot_app.bot)
-        
-        # Use asyncio.run_coroutine_threadsafe as recommended
         future = asyncio.run_coroutine_threadsafe(
-            bot_app.process_update(update), 
+            bot_app.process_update(update),
             event_loop
         )
-        
-        # Don't wait for completion to avoid blocking Flask
         return "OK", 200
-        
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
-# All handler functions remain the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -95,6 +81,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 'How much did I spend this week?'\n"
         "• 'Show me all expenses for June'\n"
         "• 'What's my biggest spending category?'\n\n"
+        "💡 *Ask for suggestions:*\n"
+        "• 'How can I reduce my expenses?'\n"
+        "• 'Suggest ways to save more money'\n\n"
         "⚙️ *Commands:*\n"
         "/balance - Current balance\n"
         "/export - Download CSV\n"
@@ -108,17 +97,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.message.from_user.id
-    
     result = process_user_message(user_text)
-    
     if result.get('message_type') == 'transaction':
         await handle_transaction(update, result, user_id)
     elif result.get('message_type') == 'query':
         await handle_query(update, result, user_id)
+    elif result.get('message_type') == 'advice':
+        await handle_advice_query(update, user_id)
     elif result.get('message_type') == 'balance':
         await handle_balance_query(update, user_id)
     else:
         await handle_unknown_message(update, result)
+
+async def handle_advice_query(update: Update, user_id: int):
+    # Fetch user's spending breakdown and recent transactions
+    breakdown = get_category_breakdown(user_id, "expense")
+    recent_txns = query_transactions(user_id, txn_type="expense")[:10]
+    advice_prompt = (
+        "You are a financial advisor. Based on the user's spending breakdown and recent expenses, "
+        "suggest three specific, actionable ways to reduce spending. "
+        f"Top spending categories: {breakdown}. "
+        f"Recent transactions: {[(t['amount'], t['description']) for t in recent_txns]}."
+    )
+    system_prompt = (
+        "Provide personalized, practical advice to help the user save money. "
+        "Be concise, specific, and use bullet points."
+    )
+    try:
+        advice = call_groq(system_prompt, advice_prompt)
+        await update.message.reply_text(f"💡 *Personalized Saving Suggestions:*\n\n{advice}", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text("❌ *Could not generate suggestions at this time.*", parse_mode="Markdown")
 
 async def handle_transaction(update: Update, result: dict, user_id: int):
     try:
@@ -128,7 +137,6 @@ async def handle_transaction(update: Update, result: dict, user_id: int):
                 parse_mode="Markdown"
             )
             return
-        
         if not all(key in result for key in ['type', 'amount', 'description']):
             await update.message.reply_text(
                 "⚠️ *Incomplete transaction data*\n"
@@ -137,31 +145,22 @@ async def handle_transaction(update: Update, result: dict, user_id: int):
                 parse_mode="Markdown"
             )
             return
-        
         add_transaction(user_id, result)
-        
         emoji = "💰" if result['type'] == 'income' else "💸"
         confidence_emoji = "✅" if result.get('confidence') == 'high' else "⚠️"
-        
         success_message = f"{confidence_emoji} *Transaction Added:*\n\n"
         success_message += f"{emoji} *{result['type'].title()}:* ₹{result['amount']:,}\n"
         success_message += f"📝 *Description:* {result['description']}\n"
         success_message += f"🏷️ *Category:* {result.get('category', 'miscellaneous')}\n"
-        
         if result.get('recipient_sender'):
             success_message += f"👤 *Contact:* {result['recipient_sender']}\n"
-        
         if result.get('split_info'):
             success_message += f"🔄 *Split:* {result['split_info']}\n"
-        
         if result.get('confidence') == 'low':
             success_message += "\n💡 *Note:* Low confidence - please verify details"
-        
         if result.get('rephrased_message') != result.get('original_message'):
             success_message += f"\n\n🔄 *Understood as:* {result['rephrased_message']}"
-        
         await update.message.reply_text(success_message, parse_mode="Markdown")
-        
     except Exception as e:
         print(f"Transaction handling error: {e}")
         await update.message.reply_text(
@@ -178,7 +177,6 @@ async def handle_query(update: Update, result: dict, user_id: int):
                 parse_mode="Markdown"
             )
             return
-        
         intent = result.get('intent', 'list')
         txn_type = result.get('type', 'both')
         category = result.get('category')
@@ -186,7 +184,6 @@ async def handle_query(update: Update, result: dict, user_id: int):
         amount_filter = result.get('amount_filter')
         start_date = result.get('start_date')
         end_date = result.get('end_date')
-        
         transactions = query_transactions(
             user_id=user_id,
             txn_type=txn_type,
@@ -196,7 +193,6 @@ async def handle_query(update: Update, result: dict, user_id: int):
             category=category,
             amount=amount_filter
         )
-        
         if not transactions:
             await update.message.reply_text(
                 "📭 *No transactions found*\n"
@@ -204,43 +200,34 @@ async def handle_query(update: Update, result: dict, user_id: int):
                 parse_mode="Markdown"
             )
             return
-        
         if intent == 'total':
             total = sum(t['amount'] for t in transactions)
             response = f"💰 *Total {txn_type}:* ₹{total:,}\n"
             response += f"📊 *Transactions found:* {len(transactions)}"
-            
         elif intent == 'list':
             response = f"📋 *Transaction List:*\n\n"
             for i, txn in enumerate(transactions[:10], 1):
                 emoji = "💰" if txn['type'] == 'income' else "💸"
                 date = txn['timestamp'].strftime('%m/%d')
                 response += f"{i}. {emoji} ₹{txn['amount']:,} - {txn['description']} ({date})\n"
-            
             if len(transactions) > 10:
                 response += f"\n... and {len(transactions) - 10} more transactions"
-                
         elif intent == 'summary':
             total_amount = sum(t['amount'] for t in transactions)
             categories = {}
             for txn in transactions:
                 cat = txn.get('category', 'miscellaneous')
                 categories[cat] = categories.get(cat, 0) + txn['amount']
-            
             response = f"📊 *Summary:*\n"
             response += f"💰 *Total:* ₹{total_amount:,}\n"
             response += f"📈 *Transactions:* {len(transactions)}\n\n"
             response += "*Top Categories:*\n"
-            
             sorted_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)
             for cat, amount in sorted_cats[:5]:
                 response += f"• {cat}: ₹{amount:,}\n"
-        
         else:
             response = f"📋 *Found {len(transactions)} transactions*"
-        
         await update.message.reply_text(response, parse_mode="Markdown")
-        
     except Exception as e:
         print(f"Query handling error: {e}")
         await update.message.reply_text(
@@ -253,10 +240,8 @@ async def handle_balance_query(update: Update, user_id: int):
     try:
         income, expense = get_balance(user_id)
         net = income - expense
-        
         category_breakdown = get_category_breakdown(user_id, "expense")
         top_category = max(category_breakdown.items(), key=lambda x: x[1]) if category_breakdown else ("N/A", 0)
-        
         await update.message.reply_text(
             f"💸 *Your Balance Summary:*\n"
             f"🟢 Income: ₹{income:,}\n"
@@ -290,21 +275,17 @@ async def handle_unknown_message(update: Update, result: dict):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_description = update.message.caption or ""
-    
     processing_msg = await update.message.reply_text(
         "🔍 *Processing screenshot...*\n"
         "⏳ Extracting transaction details...",
         parse_mode="Markdown"
     )
-    
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
             await file.download_to_drive(tmp_file.name)
             image_path = tmp_file.name
-        
         extracted_text = ""
         if TESSERACT_AVAILABLE:
             extracted_text = extract_text_from_image(image_path)
@@ -312,11 +293,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(image_path, 'rb') as img_file:
                 image_bytes = img_file.read()
             extracted_text = extract_text_online_ocr(image_bytes)
-        
         os.unlink(image_path)
-        
         transaction_data = parse_upi_screenshot(extracted_text, user_description)
-        
         if not transaction_data or transaction_data.get('amount', 0) <= 0:
             await processing_msg.edit_text(
                 "⚠️ *Could not find transaction details*\n"
@@ -324,7 +302,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
-        
         is_valid, validation_message = validate_upi_transaction(transaction_data)
         if not is_valid:
             await processing_msg.edit_text(
@@ -332,31 +309,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
-        
         enhanced_description = enhance_upi_description(transaction_data, user_description)
         transaction_data['description'] = enhanced_description
-        
         add_transaction(user_id, transaction_data)
-        
         emoji = "💰" if transaction_data['type'] == 'income' else "💸"
         confidence_emoji = "✅" if transaction_data.get('confidence') == 'high' else "⚠️"
-        
         success_message = f"{confidence_emoji} *Transaction Added from Screenshot:*\n\n"
         success_message += f"{emoji} *{transaction_data['type'].title()}:* ₹{transaction_data['amount']:,}\n"
         success_message += f"📝 *Description:* {transaction_data['description']}\n"
         success_message += f"🏷️ *Category:* {transaction_data.get('category', 'miscellaneous')}\n"
-        
         if transaction_data.get('recipient_sender'):
             success_message += f"👤 *Contact:* {transaction_data['recipient_sender']}\n"
-        
         if transaction_data.get('app_name'):
             success_message += f"📱 *App:* {transaction_data['app_name'].title()}\n"
-        
         if transaction_data.get('confidence') == 'low':
             success_message += "\n💡 *Note:* Low confidence - please verify details"
-        
         await processing_msg.edit_text(success_message, parse_mode="Markdown")
-        
     except Exception as e:
         print(f"Photo processing error: {e}")
         await processing_msg.edit_text(
@@ -365,7 +333,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# Command handlers (keep all existing ones)
+# Command handlers
+
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await handle_balance_query(update, user_id)
@@ -373,45 +342,35 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     breakdown = get_category_breakdown(user_id, "expense")
-    
     if not breakdown:
         await update.message.reply_text("📭 No expense categories found.")
         return
-    
     response = "📊 *Spending by Category:*\n"
     sorted_categories = sorted(breakdown.items(), key=lambda x: x[1], reverse=True)
-    
     for category, amount in sorted_categories[:10]:
         response += f"• {category}: ₹{amount:,}\n"
-    
     await update.message.reply_text(response, parse_mode="Markdown")
 
 async def patterns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     daily_totals = get_daily_totals(user_id, days=7)
-    
     if not daily_totals:
         await update.message.reply_text("📭 No spending patterns found.")
         return
-    
     response = "📈 *Last 7 Days Spending:*\n"
     total_week = 0
-    
     for date, data in daily_totals.items():
         amount = data['total'] if isinstance(data, dict) else data
         response += f"• {date}: ₹{amount:,}\n"
         total_week += amount
-    
     avg_daily = total_week / 7 if total_week > 0 else 0
     response += f"\n📊 *Weekly Total:* ₹{total_week:,}\n"
     response += f"📈 *Daily Average:* ₹{avg_daily:,.0f}"
-    
     await update.message.reply_text(response, parse_mode="Markdown")
 
 async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     csv_file = export_transactions_csv(user_id)
-    
     await update.message.reply_document(
         InputFile(csv_file, filename="transactions.csv"),
         caption="📊 Your transaction history exported!"
@@ -424,51 +383,35 @@ async def delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_message = "🔍 *OCR Service Status:*\n\n"
-    
     if TESSERACT_AVAILABLE:
         status_message += "✅ Tesseract OCR: Available\n"
         status_message += "📱 Screenshot support: Enabled\n"
     else:
         status_message += "❌ Tesseract OCR: Not installed\n"
         status_message += "📱 Screenshot support: Limited\n"
-    
     ocr_api_key = os.getenv("OCR_SPACE_API_KEY")
     if ocr_api_key:
         status_message += "🌐 Online OCR: Configured\n"
     else:
         status_message += "🌐 Online OCR: Not configured\n"
-    
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
 def run_bot_loop():
-    """Run bot event loop in separate thread"""
     global event_loop
     event_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(event_loop)
-    
-    # Keep the loop running
     event_loop.run_forever()
 
 def main():
-    """Main function following all best practices"""
-    global bot_app, event_loop, executor
-    
+    global bot_app, event_loop
     print("🚀 Initializing Spendie Bot...")
-    
-    # Start event loop in separate thread
     bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
     bot_thread.start()
-    
-    # Wait for event loop to be ready
     import time
     time.sleep(1)
-    
-    # Initialize bot application once at startup
     async def init_bot():
         global bot_app
         bot_app = ApplicationBuilder().token(TOKEN).build()
-        
-        # Add handlers
         bot_app.add_handler(CommandHandler("start", start))
         bot_app.add_handler(CommandHandler("balance", balance))
         bot_app.add_handler(CommandHandler("categories", categories))
@@ -476,29 +419,19 @@ def main():
         bot_app.add_handler(CommandHandler("export", export))
         bot_app.add_handler(CommandHandler("delete_all", delete_all))
         bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
-        
         bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
         await bot_app.initialize()
-        
-        # Set webhook
         if WEBHOOK_URL:
             webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
             await bot_app.bot.set_webhook(webhook_url)
             print(f"✅ Webhook set to: {webhook_url}")
-        
         print("✅ Bot initialized successfully")
-    
-    # Initialize bot
     future = asyncio.run_coroutine_threadsafe(init_bot(), event_loop)
-    future.result()  # Wait for initialization
-    
-    # Run Flask app
+    future.result()
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Starting Flask server on port {port}...")
     print("📡 Webhook mode enabled")
-    
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 if __name__ == "__main__":
