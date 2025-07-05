@@ -1,22 +1,28 @@
-# bot.py
+# bot.py 
 
 import os
 import json
 import tempfile
 import asyncio
 import threading
-from datetime import datetime
+import concurrent.futures
 from flask import Flask, request, jsonify
-from telegram import Update, InputFile
+from telegram import Update, Bot, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
 
-from parser import process_user_message
+from parser import (
+    process_user_message, parse_transaction, parse_query, 
+    is_balance_query, is_transaction_input, enhance_query_with_context
+)
+
 from db import (
     add_transaction, get_balance, query_transactions,
     export_transactions_csv, delete_all_transactions,
-    get_category_breakdown, get_daily_totals
+    get_category_breakdown, get_spending_patterns,
+    get_daily_totals, compare_periods
 )
+
 from upi_ocr import (
     extract_text_from_image, extract_text_online_ocr,
     parse_upi_screenshot, validate_upi_transaction,
@@ -27,9 +33,13 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+# Flask app
 app = Flask(__name__)
+
+# Global variables
 bot_app = None
 event_loop = None
+executor = None
 
 @app.route("/")
 def home():
@@ -43,17 +53,9 @@ def health():
 def ping():
     return "pong"
 
-@app.route("/keep-alive")
-def keep_alive():
-    return jsonify({
-        "status": "alive", 
-        "timestamp": datetime.now().isoformat(),
-        "bot": "running"
-    }), 200
-
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Fixed webhook that actually processes updates"""
+    """Fixed webhook handler following best practices"""
     try:
         update_data = request.get_json()
         if not update_data:
@@ -61,19 +63,20 @@ def webhook():
             
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Schedule update processing on the main event loop
-        asyncio.run_coroutine_threadsafe(
+        # Use asyncio.run_coroutine_threadsafe as recommended
+        future = asyncio.run_coroutine_threadsafe(
             bot_app.process_update(update), 
             event_loop
         )
         
+        # Don't wait for completion to avoid blocking Flask
         return "OK", 200
         
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
-# All your existing handler functions remain the same
+# All handler functions remain the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -81,20 +84,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 'Spent ₹200 on groceries'\n"
         "• 'Got ₹5000 salary'\n"
         "• 'Got 1200 from dad' (informal amounts work!)\n"
+        "• 'John gave me 1000' (person names work!)\n"
         "• 'Papa ne 1200 diye' (Hindi also works!)\n\n"
         "📱 *Screenshots:*\n"
         "• Send any payment screenshot\n"
-        "• Add optional description with photo\n\n"
+        "• Add optional description with photo\n"
+        "• Bot will auto-extract transaction details\n\n"
         "📊 *Ask Questions:*\n"
         "• 'What's my current balance?'\n"
         "• 'How much did I spend this week?'\n"
-        "• 'Show me all expenses for June'\n\n"
+        "• 'Show me all expenses for June'\n"
+        "• 'What's my biggest spending category?'\n\n"
         "⚙️ *Commands:*\n"
         "/balance - Current balance\n"
         "/export - Download CSV\n"
         "/delete_all - Clear all data\n"
         "/categories - Show spending by category\n"
-        "/patterns - Show spending patterns",
+        "/patterns - Show spending patterns\n"
+        "/ocr_status - Check OCR service status",
         parse_mode="Markdown"
     )
 
@@ -126,7 +133,7 @@ async def handle_transaction(update: Update, result: dict, user_id: int):
             await update.message.reply_text(
                 "⚠️ *Incomplete transaction data*\n"
                 "Please provide amount and description.\n"
-                "Example: 'Got 1200 from dad'",
+                "Example: 'Got 1200 from dad' or 'Papa ne 1200 diye'",
                 parse_mode="Markdown"
             )
             return
@@ -144,6 +151,9 @@ async def handle_transaction(update: Update, result: dict, user_id: int):
         if result.get('recipient_sender'):
             success_message += f"👤 *Contact:* {result['recipient_sender']}\n"
         
+        if result.get('split_info'):
+            success_message += f"🔄 *Split:* {result['split_info']}\n"
+        
         if result.get('confidence') == 'low':
             success_message += "\n💡 *Note:* Low confidence - please verify details"
         
@@ -155,7 +165,8 @@ async def handle_transaction(update: Update, result: dict, user_id: int):
     except Exception as e:
         print(f"Transaction handling error: {e}")
         await update.message.reply_text(
-            "❌ *Error adding transaction*\nSomething went wrong. Please try again.",
+            "❌ *Error adding transaction*\n"
+            "Something went wrong. Please try again.",
             parse_mode="Markdown"
         )
 
@@ -188,7 +199,8 @@ async def handle_query(update: Update, result: dict, user_id: int):
         
         if not transactions:
             await update.message.reply_text(
-                "📭 *No transactions found*\nNo transactions match your query criteria.",
+                "📭 *No transactions found*\n"
+                "No transactions match your query criteria.",
                 parse_mode="Markdown"
             )
             return
@@ -232,7 +244,8 @@ async def handle_query(update: Update, result: dict, user_id: int):
     except Exception as e:
         print(f"Query handling error: {e}")
         await update.message.reply_text(
-            "❌ *Error processing query*\nSomething went wrong. Please try again.",
+            "❌ *Error processing query*\n"
+            "Something went wrong. Please try again.",
             parse_mode="Markdown"
         )
 
@@ -255,7 +268,8 @@ async def handle_balance_query(update: Update, user_id: int):
     except Exception as e:
         print(f"Balance query error: {e}")
         await update.message.reply_text(
-            "❌ *Error getting balance*\nSomething went wrong. Please try again.",
+            "❌ *Error getting balance*\n"
+            "Something went wrong. Please try again.",
             parse_mode="Markdown"
         )
 
@@ -273,13 +287,13 @@ async def handle_unknown_message(update: Update, result: dict):
         parse_mode="Markdown"
     )
 
-# Keep all your other handler functions (handle_photo, balance, categories, etc.)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_description = update.message.caption or ""
     
     processing_msg = await update.message.reply_text(
-        "🔍 *Processing screenshot...*\n⏳ Extracting transaction details...",
+        "🔍 *Processing screenshot...*\n"
+        "⏳ Extracting transaction details...",
         parse_mode="Markdown"
     )
     
@@ -346,10 +360,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Photo processing error: {e}")
         await processing_msg.edit_text(
-            "❌ *Error processing screenshot*\nSomething went wrong while processing your image.",
+            "❌ *Error processing screenshot*\n"
+            "Something went wrong while processing your image.",
             parse_mode="Markdown"
         )
 
+# Command handlers (keep all existing ones)
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await handle_balance_query(update, user_id)
@@ -424,27 +440,30 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
-def run_event_loop():
-    """Run event loop in separate thread"""
+def run_bot_loop():
+    """Run bot event loop in separate thread"""
     global event_loop
     event_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(event_loop)
+    
+    # Keep the loop running
     event_loop.run_forever()
 
 def main():
-    global bot_app, event_loop
+    """Main function following all best practices"""
+    global bot_app, event_loop, executor
     
     print("🚀 Initializing Spendie Bot...")
     
     # Start event loop in separate thread
-    loop_thread = threading.Thread(target=run_event_loop, daemon=True)
-    loop_thread.start()
+    bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
+    bot_thread.start()
     
     # Wait for event loop to be ready
     import time
-    time.sleep(2)
+    time.sleep(1)
     
-    # Initialize bot
+    # Initialize bot application once at startup
     async def init_bot():
         global bot_app
         bot_app = ApplicationBuilder().token(TOKEN).build()
@@ -457,6 +476,7 @@ def main():
         bot_app.add_handler(CommandHandler("export", export))
         bot_app.add_handler(CommandHandler("delete_all", delete_all))
         bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
+        
         bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
@@ -472,11 +492,12 @@ def main():
     
     # Initialize bot
     future = asyncio.run_coroutine_threadsafe(init_bot(), event_loop)
-    future.result()
+    future.result()  # Wait for initialization
     
     # Run Flask app
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Starting Flask server on port {port}...")
+    print("📡 Webhook mode enabled")
     
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
