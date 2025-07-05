@@ -21,10 +21,10 @@ from db import (
     get_daily_totals, compare_periods
 )
 from upi_ocr import (
-    extract_text_from_image, extract_text_online_ocr,
     parse_upi_screenshot, validate_upi_transaction,
-    enhance_upi_description, TESSERACT_AVAILABLE
+    enhance_upi_description
 )
+
 
 load_dotenv()
 
