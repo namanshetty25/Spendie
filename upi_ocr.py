@@ -1,4 +1,4 @@
-# upi_ocr.py - UPI Screenshot Extraction using Groq VLM (Vision-Language Model) ONLY
+# upi_ocr.py - UPI Screenshot Extraction using Groq VLM (Vision-Language Model) 
 
 import os
 import base64
@@ -29,20 +29,22 @@ def extract_upi_details_vlm(image_path, user_description=""):
     client = Groq(api_key=GROQ_API_KEY)
     image_b64 = encode_image_to_base64(image_path)
     prompt = (
-        "This is a screenshot of a UPI transaction confirmation. First, extract all visible text exactly as it appears in the image.\n\n"
-        "Then, classify the extracted information into the following JSON format:\n\n"
-        "{\n"
-        "  \"type\": \"income or expense\",\n"
-        "  \"amount\": number (in rupees),\n"
-        "  \"description\": \"brief description of what this payment is for, if known or inferable\",\n"
-        "  \"category\": \"e.g., food, transfer, shopping, bill, etc.\",\n"
-        "  \"recipient_sender\": \"name of the person or business the money was sent to or received from\",\n"
-        "  \"transaction_id\": null (if not visible),\n"
-        "  \"app_name\": null (if not visible),\n"
-        "  \"confidence\": \"high / medium / low\"\n"
-        "}\n\n"
-        "Use context and keywords like \"Paid to\", \"Received from\", etc. to infer direction and fill the fields. If information is not explicitly stated or cannot be reasonably inferred, use null.\n"
-        f"User description: {user_description}"
+        "You are an expert at reading Indian UPI payment screenshots and extracting structured data.\n"
+        "Given the attached payment screenshot, extract and return a JSON object with these fields:\n"
+        "- type: \"income\" or \"expense\" (did the user pay or receive?)\n"
+        "- amount: integer, in rupees (extract from ₹, Rs, or numbers like 10.00)\n"
+        "- description: what is this payment for? (e.g., 'Paid to Vishwanath D Shetty')\n"
+        "- category: best guess (food, transfer, shopping, bill, etc.)\n"
+        "- recipient_sender: name of the person or business paid to or received from\n"
+        "- transaction_id: transaction/reference ID if visible, else null\n"
+        "- app_name: payment app if visible (e.g., PhonePe, Paytm, GPay)\n"
+        "- confidence: \"high\", \"medium\", or \"low\" (how sure are you?)\n"
+        "If a field is not visible or cannot be inferred, set it to null.\n"
+        "Use context and keywords like 'Paid to', 'Received from', 'credited', etc. to infer direction.\n"
+        "If the screenshot is a payment success page, infer direction from the layout and text.\n"
+        "If the user provided a description, use it to improve the result: "
+        f"{user_description}\n"
+        "Return ONLY the JSON object, no extra text."
     )
     completion = client.chat.completions.create(
         model=GROQ_VISION_MODEL,
@@ -59,7 +61,6 @@ def extract_upi_details_vlm(image_path, user_description=""):
         max_tokens=1024,
         response_format={"type": "json_object"}
     )
-    # Parse the JSON result
     try:
         return json.loads(completion.choices[0].message.content)
     except Exception as e:
@@ -119,7 +120,3 @@ def enhance_upi_description(transaction_data, user_description=""):
     if upi_context:
         final_description += f" [{', '.join(upi_context)}]"
     return final_description
-
-def extract_text_online_ocr(image_bytes):
-    """Extract text using online OCR service as fallback (not implemented)"""
-    return "OCR service unavailable"
