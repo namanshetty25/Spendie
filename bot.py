@@ -1,13 +1,15 @@
-# bot.py 
+# bot.py
 
 import os
 import json
 import tempfile
+import asyncio
+import threading
+from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
-from datetime import datetime
 
 from parser import process_user_message
 from db import (
@@ -27,6 +29,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 app = Flask(__name__)
 bot_app = None
+event_loop = None
 
 @app.route("/")
 def home():
@@ -50,20 +53,27 @@ def keep_alive():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Simplified webhook without async issues"""
+    """Fixed webhook that actually processes updates"""
     try:
         update_data = request.get_json()
         if not update_data:
             return "No data", 400
+            
+        update = Update.de_json(update_data, bot_app.bot)
         
-        # Just return OK immediately - let Telegram handle retries if needed
+        # Schedule update processing on the main event loop
+        asyncio.run_coroutine_threadsafe(
+            bot_app.process_update(update), 
+            event_loop
+        )
+        
         return "OK", 200
         
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
-# All your existing handler functions remain exactly the same
+# All your existing handler functions remain the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -263,6 +273,7 @@ async def handle_unknown_message(update: Update, result: dict):
         parse_mode="Markdown"
     )
 
+# Keep all your other handler functions (handle_photo, balance, categories, etc.)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_description = update.message.caption or ""
@@ -413,39 +424,60 @@ async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
 
+def run_event_loop():
+    """Run event loop in separate thread"""
+    global event_loop
+    event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(event_loop)
+    event_loop.run_forever()
+
 def main():
-    global bot_app
+    global bot_app, event_loop
     
     print("🚀 Initializing Spendie Bot...")
     
-    # Initialize bot for polling mode (simpler and more reliable)
-    bot_app = ApplicationBuilder().token(TOKEN).build()
+    # Start event loop in separate thread
+    loop_thread = threading.Thread(target=run_event_loop, daemon=True)
+    loop_thread.start()
     
-    # Add handlers
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("balance", balance))
-    bot_app.add_handler(CommandHandler("categories", categories))
-    bot_app.add_handler(CommandHandler("patterns", patterns))
-    bot_app.add_handler(CommandHandler("export", export))
-    bot_app.add_handler(CommandHandler("delete_all", delete_all))
-    bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
-    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Wait for event loop to be ready
+    import time
+    time.sleep(2)
     
-    # Run Flask for health checks only
+    # Initialize bot
+    async def init_bot():
+        global bot_app
+        bot_app = ApplicationBuilder().token(TOKEN).build()
+        
+        # Add handlers
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("balance", balance))
+        bot_app.add_handler(CommandHandler("categories", categories))
+        bot_app.add_handler(CommandHandler("patterns", patterns))
+        bot_app.add_handler(CommandHandler("export", export))
+        bot_app.add_handler(CommandHandler("delete_all", delete_all))
+        bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
+        bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        await bot_app.initialize()
+        
+        # Set webhook
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
+            await bot_app.bot.set_webhook(webhook_url)
+            print(f"✅ Webhook set to: {webhook_url}")
+        
+        print("✅ Bot initialized successfully")
+    
+    # Initialize bot
+    future = asyncio.run_coroutine_threadsafe(init_bot(), event_loop)
+    future.result()
+    
+    # Run Flask app
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Starting Flask server on port {port}...")
     
-    # Start bot in polling mode (more reliable than webhooks)
-    import threading
-    def run_bot():
-        import asyncio
-        asyncio.run(bot_app.run_polling())
-    
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # Run Flask for health checks
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 if __name__ == "__main__":
