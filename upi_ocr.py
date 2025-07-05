@@ -37,19 +37,22 @@ def extract_upi_details_vlm(image_path, user_description=""):
         raise RuntimeError("Groq API key or SDK not set")
     client = Groq(api_key=GROQ_API_KEY)
     image_b64 = encode_image_to_base64(image_path)
-    prompt = (
-        "This is a screenshot of a UPI payment confirmation. "
-        "Extract the following as JSON: "
-        "- type (\"income\" or \"expense\")\n"
-        "- amount (number, in rupees)\n"
-        "- description (brief text)\n"
-        "- category (food, transfer, etc.)\n"
-        "- recipient_sender (person or business name)\n"
-        "- transaction_id (if visible)\n"
-        "- app_name (if visible)\n"
-        "- confidence (\"high\", \"medium\", \"low\")\n"
-        "If any field is missing, return null for that field. "
-        "If possible, infer direction (paid/received) from context. "
+    prompt = ("This is a screenshot of a UPI transaction confirmation. First, extract all visible text exactly as it appears in the image."
+
+"Then, classify the extracted information into the following JSON format:
+
+{
+  "type": "income or expense",
+  "amount": number (in rupees),
+  "description": "brief description of what this payment is for, if known or inferable",
+  "category": "e.g., food, transfer, shopping, bill, etc.",
+  "recipient_sender": "name of the person or business the money was sent to or received from",
+  "transaction_id": null (if not visible),
+  "app_name": null (if not visible),
+  "confidence": "high / medium / low"
+}"
+
+"Use context and keywords like "Paid to", "Received from", etc. to infer direction and fill the fields. If information is not explicitly stated or cannot be reasonably inferred, use null."
         f"User description: {user_description}"
     )
     completion = client.chat.completions.create(
