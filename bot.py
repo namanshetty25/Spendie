@@ -84,13 +84,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 *Ask for suggestions:*\n"
         "• 'How can I reduce my expenses?'\n"
         "• 'Suggest ways to save more money'\n\n"
-        "⚙️ *Commands:*\n"
-        "/balance - Current balance\n"
-        "/export - Download CSV\n"
-        "/delete_all - Clear all data\n"
-        "/categories - Show spending by category\n"
-        "/patterns - Show spending patterns\n"
-        "/ocr_status - Check OCR service status",
         parse_mode="Markdown"
     )
 
@@ -289,7 +282,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(tmp_file.name)
             image_path = tmp_file.name
 
-        # Check if file exists and is not empty
         if not os.path.exists(image_path) or os.path.getsize(image_path) == 0:
             await processing_msg.edit_text(
                 "⚠️ *Failed to save image. Please try again.*",
@@ -297,10 +289,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Call parse_upi_screenshot with image_path (not extracted_text)
         transaction_data = parse_upi_screenshot(image_path, user_description)
-
-        # Delete the temp file after processing
         os.unlink(image_path)
 
         if not transaction_data or transaction_data.get('amount', 0) <= 0:
@@ -327,7 +316,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_message = f"{confidence_emoji} *Transaction Added from Screenshot:*\n\n"
         success_message += f"{emoji} *{transaction_data['type'].title()}:* ₹{transaction_data['amount']:,}\n"
         success_message += f"📝 *Description:* {transaction_data['description']}\n"
-        success_message += f"🏷 *Category:* {transaction_data.get('category', 'miscellaneous')}\n"
+        success_message += f"🏷️ *Category:* {transaction_data.get('category', 'miscellaneous')}\n"
         if transaction_data.get('recipient_sender'):
             success_message += f"👤 *Contact:* {transaction_data['recipient_sender']}\n"
         if transaction_data.get('app_name'):
@@ -344,6 +333,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Something went wrong while processing your image.",
             parse_mode="Markdown"
         )
+
 
 # Command handlers
 
@@ -393,21 +383,6 @@ async def delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = delete_all_transactions(user_id)
     await update.message.reply_text(f"🗑️ Deleted {result.deleted_count} transactions.")
 
-async def ocr_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_message = "🔍 *OCR Service Status:*\n\n"
-    if TESSERACT_AVAILABLE:
-        status_message += "✅ Tesseract OCR: Available\n"
-        status_message += "📱 Screenshot support: Enabled\n"
-    else:
-        status_message += "❌ Tesseract OCR: Not installed\n"
-        status_message += "📱 Screenshot support: Limited\n"
-    ocr_api_key = os.getenv("OCR_SPACE_API_KEY")
-    if ocr_api_key:
-        status_message += "🌐 Online OCR: Configured\n"
-    else:
-        status_message += "🌐 Online OCR: Not configured\n"
-    await update.message.reply_text(status_message, parse_mode="Markdown")
-
 def run_bot_loop():
     global event_loop
     event_loop = asyncio.new_event_loop()
@@ -430,7 +405,6 @@ def main():
         bot_app.add_handler(CommandHandler("patterns", patterns))
         bot_app.add_handler(CommandHandler("export", export))
         bot_app.add_handler(CommandHandler("delete_all", delete_all))
-        bot_app.add_handler(CommandHandler("ocr_status", ocr_status))
         bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         await bot_app.initialize()
