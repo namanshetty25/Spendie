@@ -1,166 +1,145 @@
-# upi_ocr.py 
+# upi_ocr.py - UPI Screenshot Extraction using Groq VLM (Vision-Language Model) with fallback OCR
 
 import os
-import requests
-from PIL import Image
-from io import BytesIO
-import re
-from datetime import datetime
+import base64
 import json
+from dotenv import load_dotenv
 
+# Optional: Classic OCR fallback
 try:
     import pytesseract
     import cv2
     import numpy as np
     TESSERACT_AVAILABLE = True
-    print("✅ OCR libraries loaded successfully")
-except ImportError as e:
+except ImportError:
     TESSERACT_AVAILABLE = False
-    print(f"⚠️ Warning: OCR libraries not available - {e}")
 
-from parser import call_groq
+# --- Groq VLM setup ---
+try:
+    from groq import Groq
+    GROQ_SDK_AVAILABLE = True
+except ImportError:
+    GROQ_SDK_AVAILABLE = False
 
-def preprocess_image(image):
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+def encode_image_to_base64(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode("utf-8")
+
+def extract_upi_details_vlm(image_path, user_description=""):
     """
-    Preprocess image for better OCR:
-    - Resize to at least 1024px width
-    - Convert to grayscale
-    - Apply adaptive thresholding
-    - Denoise (median blur)
+    Use Groq's Vision-Language Model to extract UPI transaction details as JSON.
     """
-    # Resize (scale up if too small)
-    h, w = image.shape[:2]
-    if w < 1024:
-        scale = 1024 / w
-        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-    # Grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # Adaptive thresholding (robust to lighting)
-    binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    if not GROQ_API_KEY or not GROQ_SDK_AVAILABLE:
+        raise RuntimeError("Groq API key or SDK not set")
+    client = Groq(api_key=GROQ_API_KEY)
+    image_b64 = encode_image_to_base64(image_path)
+    prompt = (
+        "This is a screenshot of a UPI payment confirmation. "
+        "Extract the following as JSON: "
+        "- type (\"income\" or \"expense\")\n"
+        "- amount (number, in rupees)\n"
+        "- description (brief text)\n"
+        "- category (food, transfer, etc.)\n"
+        "- recipient_sender (person or business name)\n"
+        "- transaction_id (if visible)\n"
+        "- app_name (if visible)\n"
+        "- confidence (\"high\", \"medium\", \"low\")\n"
+        "If any field is missing, return null for that field. "
+        "If possible, infer direction (paid/received) from context. "
+        f"User description: {user_description}"
     )
-    # Denoise
-    denoised = cv2.medianBlur(binary, 3)
+    completion = client.chat.completions.create(
+        model=GROQ_VISION_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ]
+            }
+        ],
+        temperature=0.1,
+        max_tokens=1024,
+        response_format={"type": "json_object"}
+    )
+    # Parse the JSON result
+    try:
+        return json.loads(completion.choices[0].message.content)
+    except Exception as e:
+        print(f"VLM JSON parsing error: {e}")
+        return None
+
+# --- Classic OCR fallback (optional) ---
+def preprocess_image(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    denoised = cv2.medianBlur(thresh, 3)
     return denoised
 
-def extract_text_from_image(image_path_or_bytes):
-    """Extract text from image using pytesseract with enhanced preprocessing."""
+def extract_text_from_image(image_path):
     if not TESSERACT_AVAILABLE:
-        raise ImportError("pytesseract and cv2 are required for OCR functionality")
-    try:
-        if isinstance(image_path_or_bytes, str):
-            image = cv2.imread(image_path_or_bytes)
-        else:
-            image = cv2.imdecode(np.frombuffer(image_path_or_bytes, np.uint8), cv2.IMREAD_COLOR)
-        processed = preprocess_image(image)
-        # Try multiple configs for best results
-        configs = [
-            r'--oem 3 --psm 6',
-            r'--oem 3 --psm 4',
-            r'--oem 3 --psm 3',
-            r'--oem 1 --psm 6'
-        ]
-        best_text = ""
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(processed, config=config)
-                if len(text.strip()) > len(best_text.strip()):
-                    best_text = text
-            except Exception:
-                continue
-        return best_text.strip()
-    except Exception as e:
-        print(f"OCR Error: {e}")
         return ""
+    img = preprocess_image(image_path)
+    if img is None:
+        return ""
+    configs = [
+        r'--oem 3 --psm 6',
+        r'--oem 3 --psm 4',
+        r'--oem 3 --psm 3',
+        r'--oem 1 --psm 6'
+    ]
+    best_text = ""
+    for config in configs:
+        try:
+            text = pytesseract.image_to_string(img, config=config)
+            if len(text.strip()) > len(best_text.strip()):
+                best_text = text
+        except Exception:
+            continue
+    return best_text.strip()
 
-def parse_upi_screenshot(extracted_text, user_description=""):
-    """Parse any screenshot text using enhanced AI model"""
-    system_prompt = """
-You are an expert transaction parser. Extract transaction details from any screenshot text and return ONLY valid JSON.
+# --- Main interface ---
+def parse_upi_screenshot(image_path, user_description=""):
+    """
+    Main interface: Try VLM first, fallback to OCR+minimal result if needed.
+    Returns a dict with transaction details.
+    """
+    # Try VLM extraction first
+    if GROQ_API_KEY and GROQ_SDK_AVAILABLE:
+        try:
+            result = extract_upi_details_vlm(image_path, user_description)
+            if result and result.get("amount"):
+                return result
+        except Exception as e:
+            print(f"VLM extraction failed: {e}")
 
-Your job is to:
-1. Look for any amount mentioned (₹, Rs, numbers like 10.00, 10, etc.)
-2. Determine if money was paid/sent (expense) or received (income)
-3. Extract any person/business names mentioned
-4. Detect the app name if possible
-5. Create a reasonable description
-
-TRANSACTION TYPES:
-- EXPENSE: paid, sent, transferred, spent, bought, bill payment, "to [person]"
-- INCOME: received, credited, got, earned, "from [person]"
-
-CATEGORIES:
-- food, transport, shopping, utilities, entertainment, health, education
-- salary, freelance, transfer, bills, miscellaneous
-
-REQUIRED JSON FORMAT:
-{
-  "type": "income" or "expense",
-  "amount": integer (extract number only, remove decimals),
-  "description": "brief description of transaction",
-  "category": "auto-detected category",
-  "recipient_sender": "person/business name if found" or null,
-  "transaction_id": "any ID found" or null,
-  "app_name": "detected app name" or null,
-  "confidence": "high" or "medium" or "low"
-}
-
-ENHANCED EXTRACTION RULES:
-- If you see "10.00" or "₹10" → amount: 10
-- If you see "Paid to [Name]" → type: "expense", recipient_sender: "[Name]"
-- If you see "Received from [Name]" → type: "income", recipient_sender: "[Name]"
-- If you see partial text like "Vishwa", "Shetty" → combine as "Vishwa Shetty"
-- If you see "PhonePe", "Paytm", "GPay" → app_name
-- If unclear direction, assume "expense" for most UPI transactions
-
-IMPORTANT:
-- Extract ANY number that could be an amount
-- Make reasonable assumptions from partial text
-- If you find fragments, combine them logically
-- Don't worry about perfect OCR - work with what you have
-- Always return a valid JSON even if confidence is low
-
-Return ONLY the JSON object.
-"""
-    user_prompt = f"""
-Screenshot Text (may be incomplete due to OCR):
-
-{extracted_text}
-
-User Description (if provided):
-
-{user_description}
-
-Extract transaction details from this text. Even if the text is fragmented or unclear, try to identify:
-- Any numbers (could be amounts)
-- Any names (could be recipients)
-- Any payment direction indicators
-- Any app names
-
-Return JSON with your best interpretation.
-"""
+    # Fallback: classic OCR (returns only minimal result for now)
     try:
-        result = call_groq(system_prompt, user_prompt, temperature=0.1)
-        parsed = json.loads(result)
-        # Ensure amount is integer
-        if 'amount' in parsed:
-            try:
-                parsed['amount'] = int(float(parsed['amount']))
-            except Exception:
-                parsed['amount'] = 0
-        return parsed
+        extracted_text = extract_text_from_image(image_path)
     except Exception as e:
-        print(f"Parsing error: {e}")
-        return {
-            "type": "expense",
-            "amount": 0,
-            "description": "Could not parse screenshot",
-            "category": "miscellaneous",
-            "confidence": "low",
-            "recipient_sender": None,
-            "transaction_id": None,
-            "app_name": None
-        }
+        print(f"OCR extraction failed: {e}")
+        extracted_text = ""
+    # Optionally, you could add LLM-based parsing of extracted_text here.
+    return {
+        "type": "expense",
+        "amount": 0,
+        "description": "Could not parse screenshot",
+        "category": "miscellaneous",
+        "confidence": "low",
+        "recipient_sender": None,
+        "transaction_id": None,
+        "app_name": None
+    }
 
 def validate_upi_transaction(transaction_data):
     """Simplified validation - just check if amount exists"""
@@ -193,29 +172,5 @@ def enhance_upi_description(transaction_data, user_description=""):
     return final_description
 
 def extract_text_online_ocr(image_bytes):
-    """Extract text using online OCR service as fallback"""
-    try:
-        OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY")
-        if not OCR_SPACE_API_KEY:
-            return "OCR service not configured"
-        url = "https://api.ocr.space/parse/image"
-        files = {
-            'file': ('screenshot.jpg', image_bytes, 'image/jpeg')
-        }
-        data = {
-            'apikey': OCR_SPACE_API_KEY,
-            'language': 'eng',
-            'detectOrientation': 'true',
-            'OCREngine': '2'
-        }
-        response = requests.post(url, files=files, data=data)
-        result = response.json()
-        if result.get('IsErroredOnProcessing'):
-            return "OCR processing failed"
-        parsed_text = ""
-        for parsed_result in result.get('ParsedResults', []):
-            parsed_text += parsed_result.get('ParsedText', '')
-        return parsed_text.strip()
-    except Exception as e:
-        print(f"Online OCR error: {e}")
-        return "OCR service unavailable"
+    """Extract text using online OCR service as fallback (not implemented)"""
+    return "OCR service unavailable"
