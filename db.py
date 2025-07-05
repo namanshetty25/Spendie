@@ -34,11 +34,9 @@ def add_transaction(user_id, data):
         "source": "upi_ocr" if data.get("app_name") else "manual",
         "updated_at": datetime.now()
     }
-
     for key, value in data.items():
         if key not in transaction_data and key not in ["recipient_sender", "transaction_id", "app_name", "confidence"]:
             transaction_data[key] = value
-
     return transactions.insert_one(transaction_data)
 
 def get_balance(user_id):
@@ -46,7 +44,6 @@ def get_balance(user_id):
         {"$match": {"user_id": user_id}},
         {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}
     ]
-
     results = list(transactions.aggregate(pipeline))
     income, expense = 0, 0
     for r in results:
@@ -58,13 +55,10 @@ def get_balance(user_id):
 
 def query_transactions(user_id, txn_type="both", start_date=None, end_date=None, keywords=None, category=None, amount=None, upi_only=False):
     query = {"user_id": user_id}
-
     if txn_type != "both":
         query["type"] = txn_type
-
     if upi_only:
         query["upi_data.is_upi"] = True
-
     if start_date or end_date:
         query["timestamp"] = {}
         if start_date:
@@ -85,7 +79,6 @@ def query_transactions(user_id, txn_type="both", start_date=None, end_date=None,
                     start_last_week = end_last_week - timedelta(days=6)
                     query["timestamp"]["$gte"] = start_last_week.replace(hour=0, minute=0, second=0, microsecond=0)
                     query["timestamp"]["$lte"] = end_last_week.replace(hour=23, minute=59, second=59, microsecond=999999)
-
         if end_date:
             try:
                 end_datetime = datetime.fromisoformat(end_date)
@@ -93,7 +86,6 @@ def query_transactions(user_id, txn_type="both", start_date=None, end_date=None,
             except ValueError:
                 if end_date == "today":
                     query["timestamp"]["$lte"] = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
-
     if keywords:
         keyword_patterns = []
         for keyword in keywords:
@@ -104,10 +96,8 @@ def query_transactions(user_id, txn_type="both", start_date=None, end_date=None,
                 {"upi_data.transaction_id": {"$regex": keyword, "$options": "i"}}
             ])
         query["$or"] = keyword_patterns
-
     if category:
         query["category"] = {"$regex": category, "$options": "i"}
-
     if amount:
         query["amount"] = {}
         if "gt" in amount:
@@ -116,7 +106,6 @@ def query_transactions(user_id, txn_type="both", start_date=None, end_date=None,
             query["amount"]["$lt"] = amount["lt"]
         if "eq" in amount:
             query["amount"] = amount["eq"]
-
     return list(transactions.find(query).sort("timestamp", -1))
 
 def get_upi_stats(user_id):
@@ -130,9 +119,7 @@ def get_upi_stats(user_id):
         }},
         {"$sort": {"total_amount": -1}}
     ]
-
     app_stats = list(transactions.aggregate(pipeline))
-
     upi_pipeline = [
         {"$match": {"user_id": user_id, "upi_data.is_upi": True}},
         {"$group": {
@@ -141,9 +128,7 @@ def get_upi_stats(user_id):
             "count": {"$sum": 1}
         }}
     ]
-
     upi_totals = list(transactions.aggregate(upi_pipeline))
-
     return {
         "app_breakdown": app_stats,
         "upi_totals": upi_totals,
@@ -152,14 +137,12 @@ def get_upi_stats(user_id):
 
 def get_category_breakdown(user_id, txn_type="expense", start_date=None, end_date=None, include_upi_details=False):
     match_query = {"user_id": user_id, "type": txn_type}
-
     if start_date or end_date:
         match_query["timestamp"] = {}
         if start_date:
             match_query["timestamp"]["$gte"] = datetime.fromisoformat(start_date)
         if end_date:
             match_query["timestamp"]["$lte"] = datetime.fromisoformat(end_date)
-
     if include_upi_details:
         pipeline = [
             {"$match": match_query},
@@ -173,7 +156,6 @@ def get_category_breakdown(user_id, txn_type="expense", start_date=None, end_dat
             }},
             {"$sort": {"total": -1}}
         ]
-
         results = list(transactions.aggregate(pipeline))
         breakdown = {}
         for r in results:
@@ -197,14 +179,12 @@ def get_category_breakdown(user_id, txn_type="expense", start_date=None, end_dat
             }},
             {"$sort": {"total": -1}}
         ]
-
         results = list(transactions.aggregate(pipeline))
         return {r["_id"]: r["total"] for r in results if r["_id"]}
 
 def get_daily_totals(user_id, days=7, txn_type="expense"):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-
     pipeline = [
         {"$match": {
             "user_id": user_id,
@@ -223,7 +203,6 @@ def get_daily_totals(user_id, days=7, txn_type="expense"):
         }},
         {"$sort": {"_id": 1}}
     ]
-
     results = list(transactions.aggregate(pipeline))
     daily_totals = {}
     for r in results:
@@ -234,13 +213,11 @@ def get_daily_totals(user_id, days=7, txn_type="expense"):
             "upi": r["upi_total"],
             "manual": r["manual_total"]
         }
-
     return daily_totals
 
 def get_spending_patterns(user_id, days=30):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-
     pipeline = [
         {"$match": {
             "user_id": user_id,
@@ -260,28 +237,23 @@ def get_spending_patterns(user_id, days=30):
         }},
         {"$sort": {"total": -1}}
     ]
-
     results = list(transactions.aggregate(pipeline))
     return results
 
 def export_transactions_csv(user_id):
     import csv
     from io import StringIO
-
     txns = list(transactions.find({"user_id": user_id}).sort("timestamp", -1))
     csv_file = StringIO()
     writer = csv.writer(csv_file)
-
     writer.writerow([
         "Date", "Type", "Amount", "Description", "Category",
         "Day of Week", "Month", "Year", "Time", "Source",
         "UPI App", "Recipient/Sender", "Transaction ID", "Confidence"
     ])
-
     for t in txns:
         timestamp = t.get("timestamp", datetime.now())
         upi_data = t.get("upi_data", {})
-
         writer.writerow([
             timestamp.strftime("%Y-%m-%d"),
             t.get("type", ""),
@@ -298,7 +270,6 @@ def export_transactions_csv(user_id):
             upi_data.get("transaction_id", ""),
             upi_data.get("confidence", "")
         ])
-
     csv_file.seek(0)
     return csv_file
 
@@ -323,13 +294,11 @@ def compare_periods(user_id, period1_start, period1_end, period2_start, period2_
                 "manual_total": {"$sum": {"$cond": [{"$ne": ["$upi_data.is_upi", True]}, "$amount", 0]}}
             }}
         ]
-
         results = list(transactions.aggregate(pipeline))
         stats = {
             "income": 0, "expense": 0, "income_count": 0, "expense_count": 0,
             "upi_income": 0, "upi_expense": 0, "manual_income": 0, "manual_expense": 0
         }
-
         for r in results:
             if r["_id"] == "income":
                 stats["income"] = r["total"]
@@ -341,12 +310,9 @@ def compare_periods(user_id, period1_start, period1_end, period2_start, period2_
                 stats["expense_count"] = r["count"]
                 stats["upi_expense"] = r["upi_total"]
                 stats["manual_expense"] = r["manual_total"]
-
         return stats
-
     period1_stats = get_period_stats(period1_start, period1_end)
     period2_stats = get_period_stats(period2_start, period2_end)
-
     return {
         "period1": period1_stats,
         "period2": period2_stats,
@@ -356,6 +322,6 @@ def compare_periods(user_id, period1_start, period1_end, period2_start, period2_
             "net_change": (period2_stats["income"] - period2_stats["expense"]) -
                          (period1_stats["income"] - period1_stats["expense"]),
             "upi_change": (period2_stats["upi_income"] + period2_stats["upi_expense"]) -
-                         (period1_stats["upi_income"] + period1_stats["upi_expense"])
+                          (period1_stats["upi_income"] + period1_stats["upi_expense"])
         }
     }
