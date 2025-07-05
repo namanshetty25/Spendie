@@ -83,9 +83,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 'What's my biggest spending category?'\n\n"
         "💡 *Ask for suggestions:*\n"
         "• 'How can I reduce my expenses?'\n"
-        "• 'Suggest ways to save more money'\n\n"
+        "• 'Suggest ways to save more money'\n\n",
         parse_mode="Markdown"
     )
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
