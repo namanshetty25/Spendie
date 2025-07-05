@@ -55,7 +55,7 @@ def ping():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """Fixed webhook handler following best practices"""
+    """Simplified webhook for 24/7 operation"""
     try:
         update_data = request.get_json()
         if not update_data:
@@ -63,18 +63,26 @@ def webhook():
             
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Use asyncio.run_coroutine_threadsafe as recommended
-        future = asyncio.run_coroutine_threadsafe(
-            bot_app.process_update(update), 
-            event_loop
-        )
+        # Process in background thread (non-blocking)
+        def process_update():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(bot_app.process_update(update))
+            finally:
+                loop.close()
         
-        # Don't wait for completion to avoid blocking Flask
+        threading.Thread(target=process_update, daemon=True).start()
         return "OK", 200
         
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
+        
+@app.route("/keep-alive")
+def keep_alive():
+    return jsonify({"status": "alive", "timestamp": datetime.now().isoformat()})
+
 
 # All handler functions remain the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
