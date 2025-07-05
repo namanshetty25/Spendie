@@ -273,6 +273,8 @@ async def handle_unknown_message(update: Update, result: dict):
     )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import os
+    import tempfile
     user_id = update.message.from_user.id
     user_description = update.message.caption or ""
     processing_msg = await update.message.reply_text(
@@ -286,15 +288,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
             await file.download_to_drive(tmp_file.name)
             image_path = tmp_file.name
-        extracted_text = ""
-        if TESSERACT_AVAILABLE:
-            extracted_text = extract_text_from_image(image_path)
-        else:
-            with open(image_path, 'rb') as img_file:
-                image_bytes = img_file.read()
-            extracted_text = extract_text_online_ocr(image_bytes)
+
+        # Check if file exists and is not empty
+        if not os.path.exists(image_path) or os.path.getsize(image_path) == 0:
+            await processing_msg.edit_text(
+                "⚠️ *Failed to save image. Please try again.*",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Call parse_upi_screenshot with image_path (not extracted_text)
+        transaction_data = parse_upi_screenshot(image_path, user_description)
+
+        # Delete the temp file after processing
         os.unlink(image_path)
-        transaction_data = parse_upi_screenshot(extracted_text, user_description)
+
         if not transaction_data or transaction_data.get('amount', 0) <= 0:
             await processing_msg.edit_text(
                 "⚠️ *Could not find transaction details*\n"
@@ -302,6 +310,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
+
         is_valid, validation_message = validate_upi_transaction(transaction_data)
         if not is_valid:
             await processing_msg.edit_text(
@@ -309,6 +318,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
+
         enhanced_description = enhance_upi_description(transaction_data, user_description)
         transaction_data['description'] = enhanced_description
         add_transaction(user_id, transaction_data)
@@ -317,14 +327,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_message = f"{confidence_emoji} *Transaction Added from Screenshot:*\n\n"
         success_message += f"{emoji} *{transaction_data['type'].title()}:* ₹{transaction_data['amount']:,}\n"
         success_message += f"📝 *Description:* {transaction_data['description']}\n"
-        success_message += f"🏷️ *Category:* {transaction_data.get('category', 'miscellaneous')}\n"
+        success_message += f"🏷 *Category:* {transaction_data.get('category', 'miscellaneous')}\n"
         if transaction_data.get('recipient_sender'):
             success_message += f"👤 *Contact:* {transaction_data['recipient_sender']}\n"
         if transaction_data.get('app_name'):
             success_message += f"📱 *App:* {transaction_data['app_name'].title()}\n"
         if transaction_data.get('confidence') == 'low':
             success_message += "\n💡 *Note:* Low confidence - please verify details"
+
         await processing_msg.edit_text(success_message, parse_mode="Markdown")
+
     except Exception as e:
         print(f"Photo processing error: {e}")
         await processing_msg.edit_text(
