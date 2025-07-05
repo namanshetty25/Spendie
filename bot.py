@@ -3,13 +3,11 @@
 import os
 import json
 import tempfile
-import asyncio
-import threading
-from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
+from datetime import datetime
 
 from parser import process_user_message
 from db import (
@@ -52,28 +50,20 @@ def keep_alive():
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
+    """Simplified webhook without async issues"""
     try:
         update_data = request.get_json()
         if not update_data:
             return "No data", 400
-            
-        update = Update.de_json(update_data, bot_app.bot)
         
-        def process_update():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(bot_app.process_update(update))
-            finally:
-                loop.close()
-        
-        threading.Thread(target=process_update, daemon=True).start()
+        # Just return OK immediately - let Telegram handle retries if needed
         return "OK", 200
         
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
 
+# All your existing handler functions remain exactly the same
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Spendie Bot!*\n\n"
@@ -428,7 +418,7 @@ def main():
     
     print("🚀 Initializing Spendie Bot...")
     
-    # Initialize bot application
+    # Initialize bot for polling mode (simpler and more reliable)
     bot_app = ApplicationBuilder().token(TOKEN).build()
     
     # Add handlers
@@ -442,23 +432,20 @@ def main():
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Initialize bot
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot_app.initialize())
-    
-    # Set webhook
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-        loop.run_until_complete(bot_app.bot.set_webhook(webhook_url))
-        print(f"✅ Webhook set to: {webhook_url}")
-    
-    loop.close()
-    
-    # Run Flask app
+    # Run Flask for health checks only
     port = int(os.environ.get('PORT', 8080))
     print(f"🚀 Starting Flask server on port {port}...")
     
+    # Start bot in polling mode (more reliable than webhooks)
+    import threading
+    def run_bot():
+        import asyncio
+        asyncio.run(bot_app.run_polling())
+    
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Run Flask for health checks
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 if __name__ == "__main__":
